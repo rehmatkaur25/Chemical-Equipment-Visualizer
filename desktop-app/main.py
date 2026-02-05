@@ -1,0 +1,207 @@
+import sys
+import sqlite3
+import pandas as pd
+from datetime import datetime
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QPushButton, QFileDialog, QTableWidget, 
+                             QTableWidgetItem, QLabel, QFrame, QScrollArea, QHeaderView,
+                             QGraphicsDropShadowEffect, QMessageBox)
+from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QRect
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+
+class HoverCard(QFrame):
+    def __init__(self, color="#e2e8f0", parent=None):
+        super().__init__(parent)
+        self.top_color = color
+        self.setMouseTracking(True)
+        self._shadow = QGraphicsDropShadowEffect()
+        self._shadow.setBlurRadius(15)
+        self._shadow.setYOffset(4)
+        self._shadow.setColor(QColor(0, 0, 0, 20))
+        self.setGraphicsEffect(self._shadow)
+
+    def enterEvent(self, event):
+        self._shadow.setBlurRadius(25)
+        self._shadow.setYOffset(8)
+        self.setStyleSheet(self.styleSheet().replace(f"border-top: 5px solid {self.top_color};", "border-top: 5px solid #3b82f6;"))
+        self.setContentsMargins(2, 0, 2, 4)
+
+    def leaveEvent(self, event):
+        self._shadow.setBlurRadius(15)
+        self._shadow.setYOffset(4)
+        self.setStyleSheet(self.styleSheet().replace("border-top: 5px solid #3b82f6;", f"border-top: 5px solid {self.top_color};"))
+        self.setContentsMargins(0, 0, 0, 0)
+
+class DesktopDashboard(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Chemical Equipment Parameter Visualizer")
+        self.resize(1450, 950)
+        self.current_df = None
+        self.init_db()
+        self.initUI()
+        self.load_history_from_db()
+
+    def init_db(self):
+        self.conn = sqlite3.connect('history.db')
+        self.cursor = self.conn.cursor()
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS history 
+            (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, upload_time TEXT, units INTEGER, avg_pressure REAL)''')
+        self.conn.commit()
+
+    def create_compact_web_card(self, title, value, icon="", top_color="#3b82f6"):
+        card = HoverCard(color=top_color)
+        card.setFixedHeight(115)
+        card.setStyleSheet(f"""
+            background-color: white; 
+            border-top: 5px solid {top_color};
+            border-radius: 15px;
+        """)
+        layout = QHBoxLayout(card); layout.setContentsMargins(20, 15, 20, 15)
+        icon_lbl = QLabel(icon); icon_lbl.setStyleSheet("font-size: 30px;")
+        text_v = QVBoxLayout()
+        title_lbl = QLabel(title.upper()); title_lbl.setStyleSheet("color: black; font-size: 10px; font-weight: 800; letter-spacing: 1.2px;")
+        val_lbl = QLabel(value); val_lbl.setStyleSheet("color: #1a202c; font-size: 20px; font-weight: 900;")
+        text_v.addWidget(title_lbl); text_v.addWidget(val_lbl)
+        layout.addWidget(icon_lbl); layout.addLayout(text_v); layout.addStretch()
+        return card, val_lbl
+
+    def initUI(self):
+        self.central_widget = QWidget()
+        self.central_widget.setStyleSheet("background-color: #f1f5f9;") 
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QVBoxLayout(self.central_widget); self.main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # --- LANDING SECTION ---
+        self.landing_container = QWidget(); self.landing_container.setObjectName("landing")
+        self.landing_container.setStyleSheet("QWidget#landing { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a2a6c, stop:1 #b21f1f); }")
+        l_lay = QVBoxLayout(self.landing_container); l_lay.setAlignment(Qt.AlignCenter)
+        c_card = QFrame(); c_card.setFixedSize(600, 400); c_card.setStyleSheet("background-color: white; border-radius: 24px;")
+        sh = QGraphicsDropShadowEffect(); sh.setBlurRadius(40); sh.setColor(QColor(0,0,0,80)); c_card.setGraphicsEffect(sh)
+        cl = QVBoxLayout(c_card); cl.setContentsMargins(40,40,40,40); cl.setSpacing(20)
+        t = QLabel("Chemical Equipment\nParameter Visualizer"); t.setAlignment(Qt.AlignCenter); t.setStyleSheet("font-size: 32px; font-weight: 900; color: #1a2a6c;")
+        btn = QPushButton("Get Started →"); btn.setFixedSize(250, 55); btn.setStyleSheet("QPushButton { background-color: #1a2a6c; color: white; font-weight: bold; border-radius: 12px; }")
+        btn.clicked.connect(self.upload_file); cl.addWidget(t); cl.addWidget(btn, 0, Qt.AlignCenter)
+        l_lay.addWidget(c_card); self.main_layout.addWidget(self.landing_container)
+
+        # --- DASHBOARD SECTION ---
+        self.dashboard_container = QWidget(); self.dash_layout = QVBoxLayout(self.dashboard_container)
+        self.dash_layout.setContentsMargins(25, 20, 25, 25); self.dash_layout.setSpacing(20)
+        
+        header = QFrame(); header.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1c2c, stop:1 #4a1942); border-radius: 12px;"); header.setFixedHeight(80)
+        h_lay = QHBoxLayout(header); h_title = QLabel("Dashboard Management"); h_title.setStyleSheet("color: white; font-size: 22px; font-weight: 900; margin-left: 10px;")
+        self.btn_back = QPushButton("Analyze New File"); self.btn_back.clicked.connect(self.go_to_landing)
+        self.btn_back.setStyleSheet("background-color: #3b82f6; color: white; padding: 10px 20px; border-radius: 8px; font-weight: bold;")
+        self.btn_pdf = QPushButton("Export PDF Report"); self.btn_pdf.clicked.connect(self.download_pdf)
+        self.btn_pdf.setStyleSheet("background-color: #ef4444; color: white; padding: 10px 20px; border-radius: 8px; font-weight: bold;")
+        h_lay.addWidget(h_title); h_lay.addStretch(); h_lay.addWidget(self.btn_back); h_lay.addWidget(self.btn_pdf); self.dash_layout.addWidget(header)
+
+        kpi_h = QLabel("📋 <b>Process KPI Summary</b>")
+        kpi_h.setStyleSheet("color: black; font-size: 14px; font-weight: bold;")
+        self.dash_layout.addWidget(kpi_h)
+
+        kpi_row = QHBoxLayout(); kpi_row.setSpacing(15)
+        self.c1, self.v1 = self.create_compact_web_card("Total Units", "-", "🏢", "#3b82f6") 
+        self.c2, self.v2 = self.create_compact_web_card("Avg Pressure", "-", "🌡️", "#ef4444") 
+        self.c3, self.v3 = self.create_compact_web_card("Max Temp", "-", "🔥", "#10b981") 
+        self.c4, self.v4 = self.create_compact_web_card("Avg Flow", "-", "💧", "#f59e0b") 
+        for c in [self.c1, self.c2, self.c3, self.c4]: kpi_row.addWidget(c)
+        self.dash_layout.addLayout(kpi_row)
+
+        chart_row = QHBoxLayout(); chart_row.setSpacing(20)
+        self.bar_frame = QFrame(); self.bar_frame.setStyleSheet("background: white; border-radius: 15px; border-top: 5px solid #3b82f6;")
+        bar_lay = QVBoxLayout(self.bar_frame); b_h = QLabel("📊 <b>GRAPH</b>"); b_h.setStyleSheet("color: black; font-weight: bold; font-size: 14px;"); bar_lay.addWidget(b_h)
+        self.bar_fig = plt.figure(facecolor='white'); self.bar_canvas = FigureCanvas(self.bar_fig); self.ax1 = self.bar_fig.add_axes([0.1, 0.3, 0.8, 0.6]); bar_lay.addWidget(self.bar_canvas)
+        
+        self.pie_frame = QFrame(); self.pie_frame.setStyleSheet("background: white; border-radius: 15px; border-top: 5px solid #ef4444;")
+        pie_lay = QVBoxLayout(self.pie_frame); p_h = QLabel("🔄 <b>PORTIONS</b>"); p_h.setStyleSheet("color: black; font-weight: bold; font-size: 14px;"); pie_lay.addWidget(p_h)
+        self.pie_fig = plt.figure(facecolor='white'); self.pie_canvas = FigureCanvas(self.pie_fig); self.ax2 = self.pie_fig.add_axes([0.1, 0.1, 0.8, 0.8]); pie_lay.addWidget(self.pie_canvas)
+        chart_row.addWidget(self.bar_frame, 3); chart_row.addWidget(self.pie_frame, 2); self.dash_layout.addLayout(chart_row, 5)
+
+        bottom = QHBoxLayout(); bottom.setSpacing(20)
+        self.log_frame = QFrame(); self.log_frame.setStyleSheet("background: white; border-radius: 15px; border-top: 5px solid #10b981;")
+        log_v = QVBoxLayout(self.log_frame); l_h = QLabel("📝 <b>LOG ANALYSIS</b>"); l_h.setStyleSheet("color: black; font-weight: bold; font-size: 14px;"); log_v.addWidget(l_h)
+        self.table = QTableWidget(); self.table.setColumnCount(4); self.table.setHorizontalHeaderLabels(["Name", "Type", "Press", "Temp"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); self.table.setStyleSheet("border: none; color: #1e293b;"); log_v.addWidget(self.table); bottom.addWidget(self.log_frame, 3)
+
+        # UPDATED HISTORY BOX WITH INITIAL FORMAT (SCROLL AREA & CARDS)
+        self.hist_frame = QFrame(); self.hist_frame.setStyleSheet("background: white; border-radius: 15px; border-top: 5px solid #f59e0b;")
+        hist_v = QVBoxLayout(self.hist_frame); h_h = QLabel("📂 <b>HISTORY (LAST 5)</b>"); h_h.setStyleSheet("color: black; font-weight: bold; font-size: 14px;"); hist_v.addWidget(h_h)
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setStyleSheet("background: transparent; border: none;")
+        self.h_container = QWidget(); self.h_layout = QVBoxLayout(self.h_container); self.h_layout.setAlignment(Qt.AlignTop)
+        self.scroll.setWidget(self.h_container); hist_v.addWidget(self.scroll); bottom.addWidget(self.hist_frame, 2)
+
+        self.dash_layout.addLayout(bottom, 4); self.main_layout.addWidget(self.dashboard_container); self.dashboard_container.hide()
+
+    def go_to_landing(self): self.dashboard_container.hide(); self.landing_container.show()
+    def upload_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
+        if path:
+            self.current_df = pd.read_csv(path); filename = path.split('/')[-1]; now = datetime.now().strftime('%H:%M')
+            self.cursor.execute("INSERT INTO history (filename, upload_time, units, avg_pressure) VALUES (?, ?, ?, ?)", (filename, now, len(self.current_df), self.current_df['Pressure'].mean()))
+            self.cursor.execute("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT 5)"); self.conn.commit()
+            self.update_dashboard(self.current_df); self.load_history_from_db(); self.landing_container.hide(); self.dashboard_container.show()
+
+    def load_history_from_db(self):
+        # Clears existing items correctly
+        while self.h_layout.count():
+            item = self.h_layout.takeAt(0)
+            widget = item.widget()
+            if widget: widget.deleteLater()
+        
+        self.cursor.execute("SELECT filename, upload_time, units, avg_pressure FROM history ORDER BY id DESC")
+        for row in self.cursor.fetchall():
+            # FORCED INITIAL FORMAT CARDS
+            h_card = QFrame()
+            h_card.setFixedHeight(95)
+            h_card.setStyleSheet("""
+                background-color: white; 
+                border-bottom: 1px solid #edf2f7; 
+                border-radius: 8px;
+                margin-bottom: 5px;
+            """)
+            cv = QVBoxLayout(h_card)
+            cv.setContentsMargins(15, 10, 15, 10)
+            
+            n_lbl = QLabel(f"<b>{row[0]}</b>")
+            n_lbl.setStyleSheet("color: #3b82f6; font-size: 11px;")
+            
+            t_lbl = QLabel(row[1])
+            t_lbl.setStyleSheet("color: #888; font-size: 10px;")
+            
+            s_lbl = QLabel(f"Units: {row[2]} | P: {row[3]:.2f} bar")
+            s_lbl.setStyleSheet("color: #333; font-size: 10px;")
+            
+            cv.addWidget(n_lbl); cv.addWidget(t_lbl); cv.addWidget(s_lbl)
+            self.h_layout.addWidget(h_card)
+
+    def download_pdf(self): QMessageBox.information(self, "Success", "Analysis Report exported!")
+
+    def update_dashboard(self, df):
+        self.v1.setText(str(len(df))); self.v2.setText(f"{df['Pressure'].mean():.2f} bar")
+        self.v3.setText(f"{df['Temperature'].max()} °C"); self.v4.setText(f"{df['Flowrate'].mean():.1f} m³/h")
+        self.table.setRowCount(len(df))
+        for i, row in df.iterrows():
+            data = [str(row['Equipment Name']), str(row['Type']), f"{row['Pressure']} bar", f"{row['Temperature']} °C"]
+            for col, val in enumerate(data):
+                item = QTableWidgetItem(val)
+                if row['Temperature'] > 115 or row['Pressure'] > 7.0: item.setForeground(QColor("#ef4444")); f = QFont(); f.setBold(True); item.setFont(f)
+                self.table.setItem(i, col, item)
+        self.ax1.clear(); counts = df['Type'].value_counts()
+        self.ax1.bar(counts.index, counts.values, color=['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6'])
+        self.ax1.set_xticklabels(counts.index, rotation=45, ha='right', fontsize=9); self.bar_canvas.draw()
+        self.pie_counts = counts; self.anim_progress = 0
+        if hasattr(self, 'timer'): self.timer.stop()
+        self.timer = QTimer(); self.timer.timeout.connect(self.animate_pie); self.timer.start(35)
+
+    def animate_pie(self):
+        self.anim_progress += 0.04
+        if self.anim_progress >= 1.0: self.anim_progress = 1.0; self.timer.stop()
+        self.ax2.clear()
+        self.ax2.pie(self.pie_counts * self.anim_progress, labels=self.pie_counts.index if self.anim_progress > 0.8 else None, autopct='%1.1f%%' if self.anim_progress > 0.9 else None, startangle=90, radius=1.3, colors=['#3b82f6', '#ef4444', '#10b981', '#f59e0b'], counterclock=False)
+        self.pie_canvas.draw()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv); window = DesktopDashboard(); window.show(); sys.exit(app.exec_()) 
